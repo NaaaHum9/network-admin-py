@@ -1,12 +1,19 @@
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, send_file
+from matplotlib import pyplot as plt
+from config import ROUTERS
+
 from services.user_service import UserService
 from services.routers_service import RouterService
-from config import ROUTERS
+from services.monitor_service import MonitorService
+
 import asyncio
+import os
+import json
+import io
 
 user_service = UserService(ROUTERS)
-
 router_service = RouterService(ROUTERS)
+monitor_service = MonitorService(ROUTERS)
 
 routers_bp = Blueprint('routers', __name__)
 
@@ -76,3 +83,84 @@ def get_interface_info(host):
         return jsonify({"error": f"Router {host} no encontrado"}), 404  
     
     return jsonify(info), 200
+
+# Rutas para MonitorService
+@routers_bp.route("/<host>/interfaces/<path:interfaz>/octetos/<int:tiempo>", methods=["POST"])
+def iniciar_monitoreo_octetos(host, interfaz, tiempo):
+    duracion = request.args.get("duracion", default=60, type=int)
+    ok = monitor_service.start_monitoring(host, interfaz, tiempo, duracion)
+    if ok:
+        return jsonify({
+            "message": f"Monitoreo iniciado en {interfaz} del router {host}",
+            "intervalo": tiempo,
+            "duracion": duracion,
+            "estado": "activo"
+        }), 200
+    else:
+        return jsonify({
+            "message": f"Ya hay un monitoreo activo en {interfaz} del router {host}",
+            "estado": "en conflicto"
+        }), 400
+
+@routers_bp.route("/<host>/interfaces/<path:interfaz>/octetos", methods=["GET"])
+def obtener_datos_monitoreo_octetos(host, interfaz):
+    filename = f"data/{host.replace('.', '_')}_{interfaz.replace('/', '_')}.json"
+
+    if not os.path.exists(filename):
+        return jsonify({"error": "No hay datos almacenados para esta interfaz"}), 404
+
+    with open(filename, "r") as f:
+        data = json.load(f)
+
+    return jsonify(data), 200
+
+@routers_bp.route("/<host>/interfaces/<path:interfaz>/octetos", methods=["DELETE"])
+def detener_monitoreo_octetos(host, interfaz):
+    ok = monitor_service.stop_monitoring(host, interfaz)
+
+    filename = f"data/{host.replace('.', '_')}_{interfaz.replace('/', '_')}.json"
+
+    if ok:
+        return jsonify({
+            "message": f"Monitoreo detenido en {interfaz} del router {host}",
+            "estado": "detenido",
+            "archivo_guardado": os.path.exists(filename)
+        }), 200
+    else:
+        return jsonify({
+            "message": f"No había un monitoreo activo en {interfaz} del router {host}",
+            "estado": "inexistente"
+        }), 400
+
+@routers_bp.route("/<host>/interfaces/<path:interfaz>/grafica", methods=["GET"])
+def obtener_grafica_monitoreo(host, interfaz):
+    filename = f"data/{host.replace('.', '_')}_{interfaz.replace('/', '_')}.json"
+    if not os.path.exists(filename):
+        return jsonify({"error": "No hay datos monitoreados para graficar"}), 404
+
+    with open(filename, "r") as f:
+        data = json.load(f)
+
+    if not data:
+        return jsonify({"error": "El archivo existe pero no contiene datos"}), 400
+
+    # Extrae datos
+    tiempos = [entry["timestamp"] for entry in data]
+    octetos = [entry["octetos"] for entry in data]
+
+    # Genera gráfica
+    plt.figure(figsize=(10, 6))
+    plt.plot(tiempos, octetos, marker='o', linestyle='-')
+    plt.xticks(rotation=45)
+    plt.title(f"Monitoreo de Octetos en {interfaz} ({host})")
+    plt.xlabel("Tiempo")
+    plt.ylabel("Octetos")
+    plt.tight_layout()
+
+    # Guarda en buffer en memoria
+    img = io.BytesIO()
+    plt.savefig(img, format="png")
+    img.seek(0)
+    plt.close()
+
+    return send_file(img, mimetype="image/png")
